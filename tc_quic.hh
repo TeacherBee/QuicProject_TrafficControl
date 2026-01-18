@@ -1,10 +1,13 @@
-
 #ifndef TC_HH_
 #define TC_HH_
 
 #include <sys/epoll.h>
 #include <string>
 #include <time.h>
+#include <atomic>
+#include <thread>
+#include <queue>
+#include <functional>
 
 // --------------- 全局宏定义 ---------------
 /**
@@ -20,6 +23,60 @@
  */
 #define MAX_PACKET_SIZE 2048000
 
+// --------------- 网络事件结构体 ---------------
+/**
+ * @struct NetworkEvent
+ * @brief 网络特性变化事件定义
+ */
+struct NetworkEvent {
+    int64_t start_time_ms;   // 开始时间（毫秒）
+    int64_t duration_ms;     // 持续时间（毫秒）
+    int64_t bandwidth;       // 带宽（Mbps）
+    int64_t delay_ms;        // 延迟（毫秒）
+    int loss;                // 丢包率（千分比）
+    std::string description; // 事件描述
+    
+    NetworkEvent(int64_t start = 0, int64_t dur = 0, int64_t bw = 0, 
+                 int64_t delay = 0, int loss_rate = 0, const std::string& desc = "")
+        : start_time_ms(start), duration_ms(dur), bandwidth(bw), 
+          delay_ms(delay), loss(loss_rate), description(desc) {}
+    
+    // 用于优先队列排序（按开始时间从小到大）
+    bool operator>(const NetworkEvent& other) const {
+        return start_time_ms > other.start_time_ms;
+    }
+};
+
+// --------------- 网络仿真控制器 ---------------
+class NetworkSimulator {
+private:
+    class TapInterface* tap0;
+    class TapInterface* tap1;
+    std::atomic<bool> running;
+    std::atomic<bool> paused;
+    std::thread sim_thread;
+    int64_t total_duration_ms;
+    std::priority_queue<NetworkEvent, std::vector<NetworkEvent>, 
+                       std::greater<NetworkEvent>> event_queue;
+    int64_t simulation_start_time;
+    
+public:
+    NetworkSimulator(class TapInterface* t0, class TapInterface* t1);
+    ~NetworkSimulator();
+    
+    void addEvent(int64_t start_time_ms, int64_t duration_ms, int64_t bandwidth,
+                  int64_t delay_ms, int loss_rate, const std::string& desc = "");
+    void setTotalDuration(int64_t duration_ms);
+    void start();
+    void pause();
+    void resume();
+    void stop();
+    bool isRunning() const { return running; }
+    bool isPaused() const { return paused; }
+    
+private:
+    void runSimulation();
+};
 
 // --------------- 链表节点类（缓存网络数据包） ---------------
 /**
@@ -43,8 +100,10 @@ public:
         uint32_t size;          // 数据包字节大小
         uint16_t mac_type;      // MAC帧类型（如0x0800=IP协议）
         struct Node *next;      // 下一个节点指针（单链表）
-        Node(uint8_t *data, int64_t time, uint32_t sock, uint32_t size, int64_t timesample,uint16_t mac_type):
-            data(data),sendtime(time),timesample(timesample),sock(sock),size(size),next(nullptr),mac_type(mac_type){}
+        Node(uint8_t *data, int64_t time, uint32_t sock, uint32_t size, 
+             int64_t timesample, uint16_t mac_type):
+            data(data),sendtime(time),timesample(timesample),sock(sock),
+            size(size),next(nullptr),mac_type(mac_type){}
     };
     Node *head = nullptr;   // 链表头节点
     Node *tail = nullptr;   // 链表尾节点（优化尾插效率，无需遍历）
@@ -59,7 +118,8 @@ public:
      * @param timesample 接收时间戳
      * @param mac_type MAC帧类型
      */
-    void addNode(uint8_t *data, int64_t time, uint32_t sock, uint32_t size, int64_t timesample, uint16_t mac_type)
+    void addNode(uint8_t *data, int64_t time, uint32_t sock, uint32_t size, 
+                 int64_t timesample, uint16_t mac_type)
     {
         Node * newnode = new Node(data, time, sock, size, timesample, mac_type);
         if(head == nullptr) // 空链表：头尾都指向新节点
@@ -164,6 +224,9 @@ public:
     void printData(const unsigned char* data, size_t size); // 调试：打印数据包十六进制
     void freeNode(Node *node, int dst_fd)  override; // 重写释放节点（添加发送+丢包逻辑）
     bool chance_in_a_thousand(int chance); // 随机丢包判断（千分比概率）
+    
+    // 获取接口名
+    std::string get_tap_name() const { return tap_name; }
 
 private:
     std::string tap_name;   // TAP接口名（如tap0）
@@ -178,5 +241,8 @@ private:
     int64_t packet_cnt;     // 接收数据包计数（用于统计）
     int Bloss;              // 丢包率（千分比，如10=1%丢包）
 };
+
+// 线程函数声明
+void thread_function(TapInterface *tap);
 
 #endif

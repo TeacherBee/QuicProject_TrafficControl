@@ -19,6 +19,11 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <queue>
+#include <fstream>
+#include <memory>
+#include <functional>
 #include "tc_quic.hh"
 #include <random>
 //#include "ring_buffer.hh"
@@ -26,13 +31,221 @@ using namespace std;
 
 
 
+// --------------- NetworkSimulator 类实现 ---------------
+NetworkSimulator::NetworkSimulator(TapInterface* t0, TapInterface* t1) 
+    : tap0(t0), tap1(t1), running(false), paused(false), total_duration_ms(0) 
+{
+    // 设置初始参数为无限制
+    tap0->set_bw(0);
+    tap0->set_delay_ms(0);
+    tap0->set_loss(0);
+    
+    tap1->set_bw(0);
+    tap1->set_delay_ms(0);
+    tap1->set_loss(0);
+}
+
+NetworkSimulator::~NetworkSimulator() {
+    stop();
+    if (sim_thread.joinable()) {
+        sim_thread.join();
+    }
+}
+
+void NetworkSimulator::addEvent(int64_t start_time_ms, int64_t duration_ms, 
+                               int64_t bandwidth, int64_t delay_ms, int loss_rate, 
+                               const std::string& desc) {
+    event_queue.push(NetworkEvent(start_time_ms, duration_ms, bandwidth, delay_ms, loss_rate, desc));
+}
+
+void NetworkSimulator::setTotalDuration(int64_t duration_ms) {
+    total_duration_ms = duration_ms;
+}
+
+void NetworkSimulator::start() {
+    if (running) return;
+    
+    running = true;
+    paused = false;
+    simulation_start_time = tap0->get_ms();
+    
+    sim_thread = std::thread([this]() {
+        runSimulation();
+    });
+}
+
+void NetworkSimulator::pause() {
+    paused = true;
+}
+
+void NetworkSimulator::resume() {
+    paused = false;
+}
+
+void NetworkSimulator::stop() {
+    running = false;
+    if (sim_thread.joinable()) {
+        sim_thread.join();
+    }
+}
+
+void NetworkSimulator::runSimulation() {
+    cout << "\n========== 网络仿真开始 ==========" << endl;
+    cout << "总时长: " << total_duration_ms << " ms" << endl;
+    cout << "事件数: " << event_queue.size() << endl;
+    cout << "==================================" << endl;
+    
+    // 创建事件队列的副本用于处理
+    auto events = event_queue;
+    std::unique_ptr<NetworkEvent> current_event(nullptr);
+    int64_t event_end_time = 0;
+    int event_counter = 0;
+    
+    int64_t start_time = tap0->get_ms();
+    int64_t last_print_time = start_time;
+    
+    while (running && (tap0->get_ms() - start_time) < total_duration_ms) {
+        // 处理暂停
+        while (paused && running) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        
+        int64_t current_time = tap0->get_ms() - start_time;
+        
+        // 检查当前事件是否结束
+        if (current_event && current_time >= event_end_time) {
+            cout << "[事件结束][" << current_time << "ms] " 
+                 << current_event->description << endl;
+            
+            // 恢复为默认参数（无限制）
+            tap0->set_bw(0);
+            tap0->set_delay_ms(0);
+            tap0->set_loss(0);
+            
+            tap1->set_bw(0);
+            tap1->set_delay_ms(0);
+            tap1->set_loss(0);
+            
+            current_event.reset(nullptr);
+        }
+        
+        // 检查是否有新事件开始
+        if (!events.empty() && current_time >= events.top().start_time_ms) {
+            current_event = std::make_unique<NetworkEvent>(events.top());
+            events.pop();
+            
+            event_end_time = current_event->start_time_ms + current_event->duration_ms;
+            event_counter++;
+            
+            cout << "\n[事件开始 #" << event_counter << "][" << current_time << "ms] " 
+                 << current_event->description << endl;
+            cout << "  带宽: " << current_event->bandwidth << " bps" << endl;
+            cout << "  延迟: " << current_event->delay_ms << " ms" << endl;
+            cout << "  丢包: " << current_event->loss << "‰" << endl;
+            cout << "  持续时间: " << current_event->duration_ms << " ms" << endl;
+            
+            // 应用事件参数
+            // TODO(bannos)：这里考虑是否只设置tap0的参数，还是两个都设置
+            tap0->set_bw(current_event->bandwidth);
+            tap0->set_delay_ms(current_event->delay_ms);
+            tap0->set_loss(current_event->loss);
+            
+            tap1->set_bw(current_event->bandwidth);
+            tap1->set_delay_ms(current_event->delay_ms);
+            tap1->set_loss(current_event->loss);
+        }
+        
+        // 显示进度（每5秒一次）
+        if (current_time - last_print_time >= 5000) {
+            float progress = (float)current_time / total_duration_ms * 100;
+            cout << "进度: " << fixed << setprecision(1) << progress << "% (" 
+                 << current_time << " ms / " << total_duration_ms << " ms)" << endl;
+            last_print_time = current_time;
+        }
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); // 10ms检查间隔
+    }
+    
+    // 仿真结束
+    if (current_event) {
+        current_event.reset(nullptr);
+    }
+    
+    // 设置链路断开（将带宽设为极低，延迟设为极大，丢包设为100%）
+    tap0->set_bw(0.01);  // 1 bps，几乎无法通信
+    tap0->set_delay_ms(10000);  // 10秒延迟
+    tap0->set_loss(1000);  // 100%丢包
+    
+    tap1->set_bw(0.01);
+    tap1->set_delay_ms(10000);
+    tap1->set_loss(1000);
+    
+    cout << "\n========== 网络仿真结束 ==========" << endl;
+    cout << "总时长: " << total_duration_ms << " ms" << endl;
+    cout << "处理事件: " << event_counter << " 个" << endl;
+    cout << "链路已断开（带宽1bps，延迟10s，丢包100%）" << endl;
+    cout << "==================================" << endl;
+    
+    running = false;
+}
 
 // --------------- 宏定义 ---------------
 #define BUFFER_SIZE 1500        // 以太网MTU默认值（最大帧大小）
 #define SYSTEM(A) system(A)     // 封装system调用（执行系统命令）
 
+// --------------- 解析脚本文件函数 ---------------
+/**
+ * @brief 从脚本文件加载网络事件
+ * @param filename 脚本文件名
+ * @param simulator 网络仿真器
+ * @return bool 是否成功加载
+ */
+bool loadScriptFromFile(const std::string& filename, NetworkSimulator& simulator) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "无法打开脚本文件: " << filename << std::endl;
+        return false;
+    }
+    
+    std::string line;
+    int line_num = 0;
+    int event_count = 0;
+    
+    std::cout << "加载脚本文件: " << filename << std::endl;
+    
+    while (std::getline(file, line)) {
+        line_num++;
+        
+        // 跳过空行和注释
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        
+        std::istringstream iss(line);
+        int64_t start_time, duration, bandwidth, delay;
+        int loss;
+        std::string description;
+        
+        if (iss >> start_time >> duration >> bandwidth >> delay >> loss) {
+            // 读取剩余部分作为描述
+            std::getline(iss >> std::ws, description);
+            
+            simulator.addEvent(start_time, duration, bandwidth, delay, loss, description);
+            event_count++;
+            std::cout << "  事件" << event_count << ": " << start_time << "ms开始, " 
+                      << duration << "ms, " << bandwidth << "bps, " 
+                      << delay << "ms延迟, " << loss << "‰丢包" << std::endl;
+        } else {
+            std::cerr << "脚本文件第 " << line_num << " 行格式错误: " << line << std::endl;
+        }
+    }
+    
+    file.close();
+    std::cout << "成功加载 " << event_count << " 个事件" << std::endl;
+    return event_count > 0;
+}
 
-// --------------- TapInterface类实现 ---------------
+// --------------- TapInterface类实现（保持不变，除了新增方法）---------------
 /**
  * @brief TapInterface构造函数
  * @param tap_name TAP接口名（如tap0）
@@ -437,16 +650,24 @@ void TapInterface::set_loss(int loss)
 }
 
 void printHelp() {
-    std::cout << "Usage: ./program [options]" << std::endl;
+    std::cout << "Usage: ./tc_quic [options]" << std::endl;
     std::cout << "Options:" << std::endl;
-    std::cout << "  --srctap=<value>    Source Tap" << std::endl;
-    std::cout << "  --srceth=<value>    Source Eth" << std::endl;
-    std::cout << "  --srcbr=<value>     Source Bridge" << std::endl;
-    std::cout << "  --dsttap=<value>    Destination Tap" << std::endl;
-    std::cout << "  --dsteth=<value>    Destination Eth" << std::endl;
-    std::cout << "  --dstbr=<value>     Destination Bridge" << std::endl;
-    std::cout << "  --delay_ms=<value>  Delay in milliseconds" << std::endl;
+    std::cout << "  --srctap=<value>    Source Tap (default: tap0)" << std::endl;
+    std::cout << "  --srceth=<value>    Source Eth (default: eth1_h)" << std::endl;
+    std::cout << "  --srcbr=<value>     Source Bridge (default: aif)" << std::endl;
+    std::cout << "  --dsttap=<value>    Destination Tap (default: tap1)" << std::endl;
+    std::cout << "  --dsteth=<value>    Destination Eth (default: eth2_h)" << std::endl;
+    std::cout << "  --dstbr=<value>     Destination Bridge (default: bif)" << std::endl;
+    std::cout << "  --delay_ms=<value>  Initial delay in milliseconds (default: 0)" << std::endl;
+    std::cout << "  --total_time=<ms>   Total simulation duration (ms), 0=interactive mode" << std::endl;
+    std::cout << "  --script=<file>     Script file for network changes" << std::endl;
+    std::cout << "  --demo              Run a built-in demo scenario" << std::endl;
     std::cout << "  -h, --help          Display this help message" << std::endl;
+    std::cout << "\nInteractive mode commands (when total_time=0):" << std::endl;
+    std::cout << "  b <value>  Set bandwidth (bps)" << std::endl;
+    std::cout << "  r <value>  Set RTT (ms)" << std::endl;
+    std::cout << "  l <value>  Set loss rate (‰)" << std::endl;
+    std::cout << "  q          Quit interactive mode" << std::endl;
 }
 
 /**
@@ -456,7 +677,6 @@ void printHelp() {
  */
 void thread_function(TapInterface *tap)
 {
-
     while(true)
     {
         tap->tap_read();
@@ -504,37 +724,73 @@ std::pair<char, int64_t> parseInput(const std::string& line) {
     }
 }
 
+// --------------- 示例脚本生成函数 ---------------
+/**
+ * @brief 创建内置演示脚本
+ * @param simulator 网络仿真器
+ * @param total_duration_ms 总时长
+ * @details 创建一个模拟网络拥塞、恢复、波动的完整场景
+ */
+void createDemoScenario(NetworkSimulator& simulator, int64_t total_duration_ms) {
+    cout << "使用内置演示脚本..." << endl;
+    
+    // 正常网络 (0-10秒)
+    simulator.addEvent(0,      10000,  100000000, 50,  0,   "正常网络: 100Mbps, 50ms延迟");
+    
+    // 轻度拥塞 (10-20秒)
+    simulator.addEvent(10000,  10000,  50000000,  100, 20,  "轻度拥塞: 50Mbps, 100ms延迟, 2%丢包");
+    
+    // 网络波动 (20-30秒)
+    simulator.addEvent(20000,  2000,   20000000,  200, 50,  "重度拥塞: 20Mbps, 200ms延迟, 5%丢包");
+    simulator.addEvent(22000,  2000,   80000000,  150, 10,  "恢复中: 80Mbps, 150ms延迟, 1%丢包");
+    simulator.addEvent(24000,  2000,   20000000,  250, 80,  "再次拥塞: 20Mbps, 250ms延迟, 8%丢包");
+    simulator.addEvent(26000,  2000,   60000000,  120, 5,   "部分恢复: 60Mbps, 120ms延迟, 0.5%丢包");
+    simulator.addEvent(28000,  2000,   40000000,  180, 30,  "中度拥塞: 40Mbps, 180ms延迟, 3%丢包");
+    
+    // 网络恢复 (30-40秒)
+    simulator.addEvent(30000,  5000,   80000000,  100, 5,   "恢复: 80Mbps, 100ms延迟, 0.5%丢包");
+    simulator.addEvent(35000,  5000,   100000000, 50,  0,   "完全恢复: 100Mbps, 50ms延迟");
+    
+    cout << "已创建演示脚本，包含10个网络事件" << endl;
+}
+
 // --------------- 主函数 ---------------
 /**
  * @brief 程序入口函数
  * @param argc 命令行参数个数
  * @param argv 命令行参数数组
  * @return int 程序退出码（0=成功，1=失败）
- * @details 1. 解析命令行参数 2. 创建两个TAP接口对象 3. 配置桥接和转发 4. 创建线程处理数据包 5. 交互式修改流量参数
  */
 int main(int argc, char **argv) 
 {
     int opt; // 命令行参数解析临时变量
     // 默认参数：源/目标TAP/网卡/桥接接口
-    string srctap="tap0", srceth="eth1_h", srcbr="aif", dsttap="tap1", dsteth="eth2_h", dstbr="bif";
-    int delay_ms;
+    string srctap="tap0", srceth="eth1_h", srcbr="aif", 
+           dsttap="tap1", dsteth="eth2_h", dstbr="bif";
+    int delay_ms = 0;
+    int64_t total_time_ms = 0;
+    string script_file;
+    bool demo_mode = false;
     
     // 长命令行参数定义（getopt_long使用）
     struct option long_option[] = 
     {
-        {"srctap",   required_argument, nullptr, 'a'},
-        {"srceth",   required_argument, nullptr, 'b'},
-        {"srcbr",    required_argument, nullptr, 'c'},
-        {"dsttap",   required_argument, nullptr, 'd'},
-        {"dsteth",   required_argument, nullptr, 'e'},
-        {"dstbr",    required_argument, nullptr, 'f'},
-        {"delay_ms", required_argument, nullptr, 'g'},
-        {"help",     no_argument,       nullptr, 'h'},
-        {nullptr,    0,                 nullptr, 0}
+        {"srctap",    required_argument, nullptr, 'a'},
+        {"srceth",    required_argument, nullptr, 'b'},
+        {"srcbr",     required_argument, nullptr, 'c'},
+        {"dsttap",    required_argument, nullptr, 'd'},
+        {"dsteth",    required_argument, nullptr, 'e'},
+        {"dstbr",     required_argument, nullptr, 'f'},
+        {"delay_ms",  required_argument, nullptr, 'g'},
+        {"total_time",required_argument, nullptr, 't'},
+        {"script",    required_argument, nullptr, 's'},
+        {"demo",      no_argument,       nullptr, 'm'},
+        {"help",      no_argument,       nullptr, 'h'},
+        {nullptr,     0,                 nullptr, 0}
     };
 
     // 解析命令行参数
-    while((opt = getopt_long(argc, argv, "a:b:c:d:e:f:g:h", long_option, nullptr)) != -1) 
+    while((opt = getopt_long(argc, argv, "a:b:c:d:e:f:g:t:s:mh", long_option, nullptr)) != -1) 
     {
         switch(opt) 
         {
@@ -559,6 +815,15 @@ int main(int argc, char **argv)
             case 'g':
                 delay_ms = atoi(optarg);
                 break;
+            case 't':
+                total_time_ms = atoll(optarg);
+                break;
+            case 's':
+                script_file = optarg;
+                break;
+            case 'm':
+                demo_mode = true;
+                break;
             case 'h':
                 printHelp();
                 return 0;
@@ -568,57 +833,116 @@ int main(int argc, char **argv)
     }
 
     // --------------- 初始化TAP接口 ---------------
-    // 创建源TAP接口对象（tap0）：初始延迟0ms，带宽100bps
+    cout << "初始化TAP接口..." << endl;
     TapInterface tap0(srctap.c_str(), srcbr.c_str(), srceth.c_str(), 0, 100);
-    // 创建目标TAP接口对象（tap1）：初始延迟100ms，带宽0（无限制）
     TapInterface tap1(dsttap.c_str(), dstbr.c_str(), dsteth.c_str(), 100, 0);
-    // 打开并配置TAP接口
-    tap0.tap_open();
-    tap1.tap_open();
     
-    // 设置转发目标：tap0的数据包转发到tap1，tap1的数据包转发到tap0
+    if (tap0.tap_open() < 0 || tap1.tap_open() < 0) {
+        cerr << "无法打开TAP接口，请检查权限" << endl;
+        return 1;
+    }
+    
     tap0.set_dstap(tap1.get_tap());
     tap1.set_dstap(tap0.get_tap());
 
-    // 初始化链表（添加空节点，注释：可能是调试用）
-    tap0.addNode(nullptr,tap0.get_us(),tap1.get_tap(),1522,tap0.get_us(),0);
-    tap1.addNode(nullptr,tap1.get_us(),tap0.get_tap(),1522,tap1.get_us(),0);
+    // 初始化链表
+    tap0.addNode(nullptr, tap0.get_us(), tap1.get_tap(), 1522, tap0.get_us(), 0);
+    tap1.addNode(nullptr, tap1.get_us(), tap0.get_tap(), 1522, tap1.get_us(), 0);
 
     // --------------- 创建工作线程 ---------------
-    // 线程1：处理tap0的数据包读写
+    cout << "启动数据包处理线程..." << endl;
     thread t1(thread_function, &tap0);
-    // 线程2：处理tap1的数据包读写
     thread t2(thread_function, &tap1);
+    
+    // 给线程一点时间启动
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    // --------------- 交互式修改流量参数 ---------------
-    string line; // 输入行
+    if (total_time_ms > 0) {
+        // --------------- 脚本仿真模式 ---------------
+        NetworkSimulator simulator(&tap0, &tap1);
+        simulator.setTotalDuration(total_time_ms);
+        
+        if (demo_mode) {
+            // 使用内置演示脚本
+            createDemoScenario(simulator, total_time_ms);
+        } else if (!script_file.empty()) {
+            // 从文件加载脚本
+            if (!loadScriptFromFile(script_file, simulator)) {
+                cerr << "脚本加载失败，使用交互模式" << endl;
+                total_time_ms = 0; // 回退到交互模式
+            }
+        } else {
+            // 创建简单测试脚本
+            cout << "使用简单测试脚本..." << endl;
+            // 简单脚本：正常 -> 拥塞 -> 恢复
+            simulator.addEvent(0,      10000,  100000000, 50,  0,   "正常网络");
+            simulator.addEvent(10000,  10000,  20000000,  200, 50,  "网络拥塞");
+            simulator.addEvent(20000,  10000,  100000000, 50,  0,   "恢复网络");
+        }
+        
+        if (total_time_ms > 0) {
+            cout << "\n开始网络仿真，总时长: " << total_time_ms << " ms" << endl;
+            simulator.start();
+            
+            // 等待仿真结束
+            while (simulator.isRunning()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            
+            cout << "仿真结束，等待线程退出..." << endl;
+            // 等待工作线程结束
+            t1.join();
+            t2.join();
+            
+            return 0;
+        }
+    }
+    
+    // --------------- 交互式模式 ---------------
+    cout << "\n========== 交互模式 ==========" << endl;
+    cout << "可用命令:" << endl;
+    cout << "  b <value>  - 设置带宽 (bps)" << endl;
+    cout << "  r <value>  - 设置RTT (ms)" << endl;
+    cout << "  l <value>  - 设置丢包率 (‰)" << endl;
+    cout << "  q          - 退出程序" << endl;
+    cout << "==============================" << endl;
+    
+    string line;
     while (getline(cin, line)) // 循环读取标准输入
     {
+        if (line == "q" || line == "quit") {
+            cout << "退出程序..." << endl;
+            break;
+        }
+        
         auto parsed = parseInput(line); // 解析输入
         if(parsed.second == -1) // 解析失败
         {
+            cout << "无效输入，格式应为: [b|r|l] <value>" << endl;
             continue;
         }
         else if(parsed.first == 'b') // 设置带宽（b + 数值）
         {
             tap0.set_bw(parsed.second);
-            cout << "BW is changed: " << parsed.second << endl;
+            tap1.set_bw(parsed.second);
+            cout << "带宽已改为: " << parsed.second << " bps" << endl;
         }
         else if(parsed.first == 'r') // 设置RTT（r + 数值）
         {
-            // RTT是往返延迟，因此每个方向延迟为RTT/2（毫秒转微秒？注：原代码*1000/2，可能是单位转换）
+            // RTT是往返延迟，因此每个方向延迟为RTT/2
             tap1.set_delay_ms(parsed.second * 1000/2);
             tap0.set_delay_ms(parsed.second * 1000/2);
-            cout << "RTT is changed: " << parsed.second << endl;
+            cout << "RTT已改为: " << parsed.second << " ms (每个方向 " << parsed.second/2 << " ms)" << endl;
         }
         else if(parsed.first == 'l') // 设置丢包率（l + 数值）
         {
             tap0.set_loss(parsed.second);
-            cout << "Loss rate set to: " << parsed.second << "/10000" << endl;
+            tap1.set_loss(parsed.second);
+            cout << "丢包率已改为: " << parsed.second << "‰ (" << (parsed.second/10.0) << "%)" << endl;
         }
     }
 
-    // 等待线程结束（实际不会执行，因为线程是无限循环）
+    // 等待线程结束
     t1.join();
     t2.join();
 
