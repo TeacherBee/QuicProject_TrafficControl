@@ -352,8 +352,7 @@ void TapInterface::printData(const unsigned char* data, size_t size) {
 bool TapInterface::chance_in_a_thousand(int chance) {
     std::random_device rd;
     std::mt19937 gen(rd());
-    // TODO(bannos): 这里确认一下到底是千分之一还是万分之一
-    std::uniform_int_distribution<> distr(1, 10000);
+    std::uniform_int_distribution<> distr(1, 1000);
     return distr(gen) <= chance;
 };
 
@@ -400,20 +399,20 @@ int TapInterface::tap_read()
 
                 // --------------- 带宽限制计算 ---------------
                 // debug
-                if(tap_name == "tap0") {
-                    if(delay_ms > 0)
-                    {
-                        cout << tap_name << " --- " << "当前设置延迟：" << delay_ms << " ms" << endl;
-                    }
-                    else {
-                        cout << tap_name << " --- " << "未设置延迟" << endl;
-                    }
-                }
+                // if(tap_name == "tap0") {
+                //     if(delay_ms > 0)
+                //     {
+                //         cout << tap_name << " --- " << "当前设置延迟：" << delay_ms << " ms" << endl;
+                //     }
+                //     else {
+                //         cout << tap_name << " --- " << "未设置延迟" << endl;
+                //     }
+                // }
 
                 if(bandwidth > 0)
                 {
-                    if(tap_name == "tap0")
-                        cout << tap_name << " --- " << "带宽限制：" << bandwidth << endl;
+                    // if(tap_name == "tap0")
+                    //     cout << tap_name << " --- " << "带宽限制：" << bandwidth << endl;
                     packet_cnt++;
                     if(packet_cnt%1000 == 0)
                     {
@@ -428,7 +427,7 @@ int TapInterface::tap_read()
                     // double transmission_time_us = (size * 8.0 * 1000000.0) / bandwidth;
                     // send_time = pre_time + static_cast<int64_t>(transmission_time_us);
 
-                    cout << "pre_time: " << pre_time << " -- send_time: " << send_time << " -- delay_ms: " << delay_ms << endl;
+                    // cout << "pre_time: " << pre_time << " -- send_time: " << send_time << " -- delay_ms: " << delay_ms << endl;
                     
                     if(send_time < time_now)
                     {
@@ -444,8 +443,8 @@ int TapInterface::tap_read()
                 }
                 else // 关闭带宽限制：仅叠加延迟
                 {
-                    if(tap_name == "tap0")
-                        cout << tap_name << " --- " << "未设置带宽限制，bandwidth is " << bandwidth << endl;
+                    // if(tap_name == "tap0")
+                    //     cout << tap_name << " --- " << "未设置带宽限制，bandwidth is " << bandwidth << endl;
                     send_time = time_now + delay_ms;
                 }
                 
@@ -479,12 +478,12 @@ void TapInterface::freeNode(Node *node, int dst_fd)
     {
         if(Bloss > 0) // 开启丢包
         {
-            if(tap_name == "tap0")
-                cout << tap_name << " --- " << "当前已设置丢包：" << Bloss << endl;
+            // if(tap_name == "tap0")
+            //     cout << tap_name << " --- " << "当前已设置丢包：" << Bloss << endl;
             // 仅对tap0生效 + 随机丢包
-            if(chance_in_a_thousand(Bloss) && tap_name == "tap0")
+            if(chance_in_a_thousand(Bloss))
             {
-                cout << tap_name << " --- " << "Dropped packet" << endl; // 丢包日志
+                // cout << tap_name << " --- " << "Dropped packet" << endl; // 丢包日志
             }
             else // 不丢包：发送数据包到目标TAP接口
             {
@@ -493,8 +492,8 @@ void TapInterface::freeNode(Node *node, int dst_fd)
         }
         else // 关闭丢包：直接发送
         {
-            if(tap_name == "tap0")
-                cout << tap_name << " --- " << "未设置丢包" << endl;
+            // if(tap_name == "tap0")
+            //     cout << tap_name << " --- " << "未设置丢包" << endl;
             write(dst_fd, node->data, node->size);
         }
         delete node->data; // 释放数据包内存
@@ -735,21 +734,21 @@ void createDemoScenario(NetworkSimulator& simulator, int64_t total_duration_ms) 
     cout << "使用内置演示脚本..." << endl;
     
     // 正常网络 (0-10秒)
-    simulator.addEvent(0,      10000,  100000000, 50,  0,   "正常网络: 100Mbps, 50ms延迟");
+    simulator.addEvent(0,      10000,  100, 50,  0,   "正常网络: 100Mbps, 50ms延迟");
     
     // 轻度拥塞 (10-20秒)
-    simulator.addEvent(10000,  10000,  50000000,  100, 20,  "轻度拥塞: 50Mbps, 100ms延迟, 2%丢包");
+    simulator.addEvent(10000,  10000,  50,  100, 20,  "轻度拥塞: 50Mbps, 100ms延迟, 2%丢包");
     
     // 网络波动 (20-30秒)
-    simulator.addEvent(20000,  2000,   20000000,  200, 50,  "重度拥塞: 20Mbps, 200ms延迟, 5%丢包");
-    simulator.addEvent(22000,  2000,   80000000,  150, 10,  "恢复中: 80Mbps, 150ms延迟, 1%丢包");
-    simulator.addEvent(24000,  2000,   20000000,  250, 80,  "再次拥塞: 20Mbps, 250ms延迟, 8%丢包");
-    simulator.addEvent(26000,  2000,   60000000,  120, 5,   "部分恢复: 60Mbps, 120ms延迟, 0.5%丢包");
-    simulator.addEvent(28000,  2000,   40000000,  180, 30,  "中度拥塞: 40Mbps, 180ms延迟, 3%丢包");
+    simulator.addEvent(20000,  2000,   20,  200, 50,  "重度拥塞: 20Mbps, 200ms延迟, 5%丢包");
+    simulator.addEvent(22000,  2000,   80,  150, 10,  "恢复中: 80Mbps, 150ms延迟, 1%丢包");
+    simulator.addEvent(24000,  2000,   20,  250, 80,  "再次拥塞: 20Mbps, 250ms延迟, 8%丢包");
+    simulator.addEvent(26000,  2000,   60,  120, 5,   "部分恢复: 60Mbps, 120ms延迟, 0.5%丢包");
+    simulator.addEvent(28000,  2000,   40,  180, 30,  "中度拥塞: 40Mbps, 180ms延迟, 3%丢包");
     
     // 网络恢复 (30-40秒)
-    simulator.addEvent(30000,  5000,   80000000,  100, 5,   "恢复: 80Mbps, 100ms延迟, 0.5%丢包");
-    simulator.addEvent(35000,  5000,   100000000, 50,  0,   "完全恢复: 100Mbps, 50ms延迟");
+    simulator.addEvent(30000,  5000,   80,  100, 5,   "恢复: 80Mbps, 100ms延迟, 0.5%丢包");
+    simulator.addEvent(35000,  5000,   100, 50,  0,   "完全恢复: 100Mbps, 50ms延迟");
     
     cout << "已创建演示脚本，包含10个网络事件" << endl;
 }
@@ -875,9 +874,9 @@ int main(int argc, char **argv)
             // 创建简单测试脚本
             cout << "使用简单测试脚本..." << endl;
             // 简单脚本：正常 -> 拥塞 -> 恢复
-            simulator.addEvent(0,      10000,  100000000, 50,  0,   "正常网络");
-            simulator.addEvent(10000,  10000,  20000000,  200, 50,  "网络拥塞");
-            simulator.addEvent(20000,  10000,  100000000, 50,  0,   "恢复网络");
+            simulator.addEvent(0,      10000,  100, 50,  0,   "正常网络");
+            simulator.addEvent(10000,  10000,  20,  200, 50,  "网络拥塞");
+            simulator.addEvent(20000,  10000,  100, 50,  0,   "恢复网络");
         }
         
         if (total_time_ms > 0) {
@@ -925,7 +924,7 @@ int main(int argc, char **argv)
         {
             tap0.set_bw(parsed.second);
             tap1.set_bw(parsed.second);
-            cout << "带宽已改为: " << parsed.second << " bps" << endl;
+            cout << "带宽已改为: " << parsed.second << " Mbps" << endl;
         }
         else if(parsed.first == 'r') // 设置RTT（r + 数值）
         {
