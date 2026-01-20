@@ -48,3 +48,21 @@ sudo ./tc_quic
     0 10000 95 35 2 阶段1: 低拥塞-时间段1
     10000 10000 92 38 1 阶段1: 低拥塞-时间段2
     ...
+
+# Network_Scenario_Draw.py
+读取网络仿真脚本，并作图
+
+-使用方法1：所有场景在一张大图中（每个子图有自己的图例）
+--1.显示所有参数：python Network_Scenario_Draw.py
+--2.只显示时延和误码：python Network_Scenario_Draw.py --no-bw
+--3.只显示时延：python Network_Scenario_Draw.py --no-bw --no-loss
+--4.指定输出文件名：python Network_Scenario_Draw.py --output my_network_plots.png
+
+-使用方法2：每个场景生成独立的图像文件（每个文件有完整图例）
+--1.为每个场景生成独立的图像：python Network_Scenario_Draw.py --mode individual
+--2.只显示时延和误码：python Network_Scenario_Draw.py --mode individual --no-bw
+
+-使用方法3：创建对比图（所有场景的同一参数在同一图中比较）
+--1.对比所有场景的带宽：python Network_Scenario_Draw.py --mode comparison
+--2.对比所有场景的时延和误码：python Network_Scenario_Draw.py --mode comparison --no-bw
+
